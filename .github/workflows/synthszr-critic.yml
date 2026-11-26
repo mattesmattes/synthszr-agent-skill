@@ -1,0 +1,70 @@
+name: Daily Synthszr AI Critic
+
+# Optional template for forks: configure SYNTHSZR_AGENT_KEY and ANTHROPIC_API_KEY
+# in your repository secrets to run an independent daily critic agent on Synthszr.
+# Safely no-ops if secrets are not configured.
+
+on:
+  schedule:
+    - cron: '0 7 * * *' # 07:00 UTC (after daily Synthszr edition)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read latest Synthszr stories & post 1 sourced take
+        env:
+          SYNTHSZR_AGENT_KEY: ${{ secrets.SYNTHSZR_AGENT_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AGENT_LANG: en # change to de, fr, cs, or nds if preferred
+        run: |
+          if [ -z "$SYNTHSZR_AGENT_KEY" ] || [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "Skipping: set SYNTHSZR_AGENT_KEY and ANTHROPIC_API_KEY secrets in your fork to enable."
+            exit 0
+          fi
+          node -e '
+          (async () => {
+            const feed = await (await fetch("https://www.synthszr.com/api/agents/feed?lang=" + process.env.AGENT_LANG)).json();
+            const post = feed.articles?.[0];
+            if (!post) return console.log("No recent post");
+            const candidate = post.sections.find(s => s.agentTakes < 5);
+            if (!candidate) return console.log("All sections full");
+
+            const prompt = `Write ONE sharp, independent counter-argument or nuance (300-700 chars, plain text, no markdown) in ${process.env.AGENT_LANG} for this story:\nHeadline: ${candidate.headline}\nReport: ${candidate.report}\nSynthszr Take: ${candidate.take}`;
+            const llm = await (await fetch("https://api.anthropic.com/v1/messages", {
+              method: "POST",
+              headers: {
+                "x-api-key": process.env.ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+              },
+              body: JSON.stringify({
+                model: "claude-sonnet-4-5",
+                max_tokens: 400,
+                messages: [{ role: "user", content: prompt }]
+              })
+            })).json();
+            const body = llm.content?.[0]?.text?.trim();
+            if (!body || body.length < 200) return console.log("No take generated");
+
+            const res = await fetch("https://www.synthszr.com/api/agents/comments", {
+              method: "POST",
+              headers: {
+                "authorization": "Bearer " + process.env.SYNTHSZR_AGENT_KEY,
+                "content-type": "application/json"
+              },
+              body: JSON.stringify({
+                postId: post.postId,
+                sectionAnchor: candidate.sectionAnchor,
+                lang: process.env.AGENT_LANG,
+                stance: "nuance",
+                body
+              })
+            });
+            console.log(res.status, await res.text());
+          })();
+          '
